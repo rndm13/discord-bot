@@ -1,18 +1,33 @@
 version: "3"
 services:
-  reaction-discord-bot:
-    image: rndm13/reaction-discord-bot
-    container_name: discord-bot
-    command: "-token=${DISCORD_TOKEN_RELEASE}"
+  # database
+  db:
+    image: postgres
+    restart: always
+    container_name: postgres-db
+    network_mode: "host"
+    ports: 
+      - 5432:5432
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
   
+  # release
+  # reaction-discord-bot:
+  #   image: rndm13/reaction-discord-bot
+  #   container_name: discord-bot
+  #   command: "-token=${DISCORD_TOKEN_RELEASE} -db='postgresql://postgres:${POSTGRES_PASSWORD}@0.0.0.0:5432/postgres?sslmode=disable'"
+
+  # watchtower:
+  #     image: containrrr/watchtower
+  #     container_name: watchtower
+  #     volumes:
+  #       - /var/run/docker.sock:/var/run/docker.sock
+  #     command: --interval 30 discord-bot
+  
+  #testing
   reaction-discord-test-bot:
     image: reaction-discord-bot
     container_name: discord-test-bot
-    command: "-token=${DISCORD_TOKEN}"
-
-  watchtower:
-      image: containrrr/watchtower
-      container_name: watchtower
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
-      command: --interval 30 discord-bot
+    network_mode: "host"
+    command: "-token=${DISCORD_TOKEN} -db='postgresql://postgres:${POSTGRES_PASSWORD}@0.0.0.0:5432/postgres?sslmode=disable'"
