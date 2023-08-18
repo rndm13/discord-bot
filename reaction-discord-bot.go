@@ -183,6 +183,91 @@ WHERE server_id = $1;
     }
 }
 
+type server_config struct {
+    announcement_channel_id string
+    announcement_min_reactions int
+};
+
+func getServerConfig(server_id string) (server_config, error) {
+    conf := server_config{"",0}
+
+    config := db.QueryRow(`
+        SELECT announcement_channel_id, announcement_min_reactions FROM server_settings WHERE server_id = $1
+    `, server_id);
+    
+    if config.Err() != nil {
+        return conf, config.Err()
+    }
+
+    err := config.Scan(&conf.announcement_channel_id, &conf.announcement_min_reactions)
+    if err != nil {
+        return conf, err
+    }
+
+    return conf, nil
+}
+
+func getAnnouncedMessage(s *disc.Session, original *disc.Message) *disc.Message {
+    query := db.QueryRow(`
+        SELECT announcement_channel_id, announced_message_id
+        FROM reacted_messages
+        INNER JOIN server_config ON server_config.server_id = reacted_messages.server_id
+    `)
+    
+    if query.Err() != nil {
+        return nil
+    }
+
+    announced_message_id := ""
+    announcement_channel_id := ""
+
+    query.Scan(announcement_channel_id, announced_message_id)
+
+    msg, err := s.ChannelMessage(announcement_channel_id, announced_message_id)
+
+    if err != nil {
+        return nil
+    }
+
+    return msg
+}
+
+func editAnnouncement(s *disc.Session, actual_count int, original *disc.Message) {
+    // Kinda stupid but should work....
+    edit_num := false
+    num_start := 0
+    num_end := 0
+    
+    msg := getAnnouncedMessage(s, original)
+
+    if msg == nil {
+        return
+    }
+
+    for i, v := range msg.Content {
+        if v >= '0' && v <= '9' {
+            if num_start == 0 {
+                edit_num = true
+                num_start = i
+            }
+            if edit_num {
+                num_end = i
+            }
+        } else {
+            edit_num = false
+        }
+    }
+
+    edited_content := fmt.Sprintf("%v%v%v", msg.Content[0:num_start], actual_count, msg.Content[num_end + 1:])
+
+    s.ChannelMessageEditComplex(&disc.MessageEdit{
+        Content: &edited_content,
+
+        ID: msg.ID,
+        Channel: msg.ChannelID,
+    })
+}
+
 func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
     if m.Emoji.Name != *emoji {
         return
@@ -216,9 +301,10 @@ func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
     author_react := m.Member.User.ID == msg.Author.ID
     
     announ := db.QueryRow(`
-SELECT announced_message_id, author_reacted FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3
-    `,m.GuildID, m.ChannelID, m.MessageID);
-    announced_message_id := "";
+        SELECT announced_message_id, author_reacted FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3
+    `,m.GuildID, m.ChannelID, m.MessageID)
+    announced_message_id := ""
+    var announced_message *disc.Message = nil
 
     if announ != nil {
         announ.Scan(&announced_message_id, &author_react)
@@ -230,59 +316,53 @@ SELECT announced_message_id, author_reacted FROM reacted_messages WHERE server_i
     }
     
     if announced_message_id == "" {
-        config := db.QueryRow(`
-    SELECT announcement_channel_id, announcement_min_reactions FROM server_settings WHERE server_id = $1
-        `, m.GuildID);
-        
-        if config == nil {
-            log.Printf("Error: failed to find config for server: %v:%v\n", m.GuildID, err);
-        } else {
-            channel_id := "";
-            min_react := 0;
+        conf, err := getServerConfig(m.GuildID)
 
-            config.Scan(&channel_id, &min_react)
+        if err != nil {
+            log.Println("Error: failed to get server config: ", err)
+        } else if actual_count >= conf.announcement_min_reactions {
+            sentmsg, err := s.ChannelMessageSendComplex(
+                conf.announcement_channel_id, 
+                &disc.MessageSend{
+                    Content: fmt.Sprintf("by %v, %v %v (original message: %v)\n%v", msg.Author.Username, actual_count, *emoji, makeLink(msg), msg.Content),
+                    // Embeds: msg.Embeds,
+                },
+            );
 
-            if actual_count >= min_react {
-                sentmsg, err := s.ChannelMessageSendComplex(
-                    channel_id, 
-                    &disc.MessageSend{
-                        Content: fmt.Sprintf("by %v, %v %v (original message: %v)\n%v", msg.Author.Username, actual_count, *emoji, makeLink(msg), msg.Content),
-                        // Embeds: msg.Embeds,
-                    },
-                );
-
-                if err != nil {
-                    log.Println("Failed to sent announcement message: ", err);
-                } else {
-                    announced_message_id = sentmsg.ID
-                }
+            if err != nil {
+                log.Println("Failed to sent announcement message: ", err);
+            } else {
+                announced_message = sentmsg
+                announced_message_id = announced_message.ID
             }
         }
     }
 
-    _, err = db.Query(`
-UPDATE reacted_messages
-SET reaction_count = $5,
-    author_reacted = author_reacted OR $4,
-    announced_message_id = $6
-WHERE 
-    server_id = $1 AND 
-    channel_id = $2 AND 
-    message_id = $3;
+    upd := db.QueryRow(`
+        UPDATE reacted_messages
+        SET reaction_count = $5,
+            author_reacted = author_reacted OR $4,
+            announced_message_id = $6
+        WHERE 
+            server_id = $1 AND 
+            channel_id = $2 AND 
+            message_id = $3;
     `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count, announced_message_id);
 
-    if err != nil {
+    if upd.Err() != nil {
         log.Println("Error: db update query: ", err);
         return;
     }
+    
+    editAnnouncement(s, actual_count, msg);
 
-    _, err = db.Query(`
-INSERT INTO reacted_messages (server_id, channel_id, message_id, reaction_count, author_reacted, announced_message_id)
-SELECT $1, $2, $3, $5, $4, $6
-WHERE NOT EXISTS (SELECT 1 FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3);
+    ins := db.QueryRow(`
+        INSERT INTO reacted_messages (server_id, channel_id, message_id, reaction_count, author_reacted, announced_message_id)
+        SELECT $1, $2, $3, $5, $4, $6
+        WHERE NOT EXISTS (SELECT 1 FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3);
     `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count, announced_message_id);
 
-    if err != nil {
+    if ins.Err() != nil {
         log.Println("Error: db insert query: ", err);
         return;
     }
@@ -320,15 +400,22 @@ func reactionRemove(s *disc.Session, m *disc.MessageReactionRemove) {
     
     author_react := count > 0 && m.UserID == msg.Author.ID
         
+    actual_count := count
+    if author_react {
+        actual_count--
+    }
+
     _, err = db.Query(`
-UPDATE reacted_messages
-SET reaction_count = $5,
-    author_reacted = author_reacted AND $4
-WHERE 
-    server_id = $1 AND 
-    channel_id = $2 AND 
-    message_id = $3;
+        UPDATE reacted_messages
+        SET reaction_count = $5,
+            author_reacted = author_reacted AND $4
+        WHERE 
+            server_id = $1 AND 
+            channel_id = $2 AND 
+            message_id = $3;
     `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count);
+    
+    editAnnouncement(s, actual_count, msg);
 
     if err != nil {
         log.Println("Error: db update query: ", err);
@@ -341,7 +428,7 @@ WHERE
 func insert_settings(g []*disc.Guild) {
     for _, v := range g {
         _, err := db.Query(`
-INSERT INTO server_settings (server_id) VALUES ($1)
+            INSERT INTO server_settings (server_id) VALUES ($1)
         `, v.ID);
         if err != nil {
             // log.Println("failed to initialize settings for guild ", v.ID, ": ", err);
@@ -353,26 +440,26 @@ func init_db(db *sql.DB) {
     time.Sleep(1 * time.Second);
 
     _, err := db.Query(`
-CREATE TABLE IF NOT EXISTS server_settings(
-    server_id TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS server_settings(
+            server_id TEXT PRIMARY KEY,
 
-    announcement_channel_id TEXT,
-    announcement_min_reactions INT
-);
+            announcement_channel_id TEXT,
+            announcement_min_reactions INT
+        );
 
-CREATE TABLE IF NOT EXISTS reacted_messages(
-    id SERIAL PRIMARY KEY,
-    
-    server_id TEXT NOT NULL,
-    channel_id TEXT NOT NULL,
-    message_id TEXT NOT NULL,
-    reaction_count INT NOT NULL,
-    author_reacted BOOL NOT NULL,
-    actual_reaction_conut INT GENERATED ALWAYS AS (reaction_count - author_reacted::int) STORED,
+        CREATE TABLE IF NOT EXISTS reacted_messages(
+            id SERIAL PRIMARY KEY,
+            
+            server_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            reaction_count INT NOT NULL,
+            author_reacted BOOL NOT NULL,
+            actual_reaction_conut INT GENERATED ALWAYS AS (reaction_count - author_reacted::int) STORED,
 
-    announced_message_id TEXT
-);
-`);
+            announced_message_id TEXT
+        );
+    `);
 
     if err != nil {
         log.Fatalln("Failed to initialize database", err);
