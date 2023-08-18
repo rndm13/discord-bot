@@ -36,7 +36,8 @@ func init() {
 var db *sql.DB
 
 func init() {
-    db, err := sql.Open("postgres", *db_conn);
+    db_, err := sql.Open("postgres", *db_conn);
+    db = db_
 
     if err != nil {
         log.Fatalln("Failed to connect to database: ", err)
@@ -80,7 +81,8 @@ func add_commands(s *disc.Session, g *disc.Guild) {
 }
 
 func main() {
-    dg, err := disc.New("Bot " + *token)
+    dg_, err := disc.New("Bot " + *token)
+    dg = dg_
 
     if err != nil {
         log.Fatalln("Failed to create a bot: ", err)
@@ -123,10 +125,59 @@ func main() {
 }
 
 func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
-    if (m.Emoji.Name != *emoji) {
+    if m.Emoji.Name != *emoji {
         return
     }
+
     log.Printf("User %s reacted with matching emote\n", m.UserID);
+    
+    msg, err := s.ChannelMessage(m.ChannelID, m.MessageID)
+
+    if err != nil {
+        log.Println("Error: failed to get channel message reacted to: ", err);
+        return;
+    }
+
+    count := 1
+
+    for _, mr := range msg.Reactions {
+        if mr.Emoji.Name != *emoji {
+            continue
+        }
+
+        count = mr.Count
+        break
+    }
+    
+    author_react := m.Member.User.ID == msg.Author.ID
+        
+    _, err = db.Query(`
+UPDATE reacted_messages
+SET reaction_count = $5,
+    author_reacted = author_reacted OR $4
+WHERE 
+    server_id = $1 AND 
+    channel_id = $2 AND 
+    message_id = $3;
+    `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count);
+
+    if err != nil {
+        log.Println("Error: db update query: ", err);
+        return;
+    }
+
+    _, err = db.Query(`
+INSERT INTO reacted_messages (server_id, channel_id, message_id, reaction_count, author_reacted)
+SELECT $1, $2, $3, $5, $4
+WHERE NOT EXISTS (SELECT 1 FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3);
+    `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count);
+
+    if err != nil {
+        log.Println("Error: db insert query: ", err);
+        return;
+    }
+
+    log.Println("Added or updated record to reacted_messages");
 }
 
 func reactionRemove(s *disc.Session, m *disc.MessageReactionRemove) {
@@ -134,6 +185,43 @@ func reactionRemove(s *disc.Session, m *disc.MessageReactionRemove) {
         return
     }
     log.Printf("User %s removed matching emote\n", m.UserID);
+    
+    msg, err := s.ChannelMessage(m.ChannelID, m.MessageID)
+
+    if err != nil {
+        log.Println("Error: failed to get channel message reacted to: ", err);
+        return;
+    }
+    
+    count := 0
+
+    for _, mr := range msg.Reactions {
+        if mr.Emoji.Name != *emoji {
+            continue
+        }
+
+        count = mr.Count
+        break
+    }
+    
+    author_react := count > 0 && m.UserID == msg.Author.ID
+        
+    _, err = db.Query(`
+UPDATE reacted_messages
+SET reaction_count = $5,
+    author_reacted = author_reacted AND $4
+WHERE 
+    server_id = $1 AND 
+    channel_id = $2 AND 
+    message_id = $3;
+    `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count);
+
+    if err != nil {
+        log.Println("Error: db update query: ", err);
+        return;
+    }
+
+    log.Println("Updated record to reacted_messages");
 }
 
 func init_db(db *sql.DB) {
@@ -141,24 +229,23 @@ func init_db(db *sql.DB) {
 
     _, err := db.Query(`
 CREATE TABLE IF NOT EXISTS server_settings(
-    server_id VARCHAR PRIMARY KEY,
+    server_id TEXT PRIMARY KEY,
 
-    announcement_channel_id VARCHAR,
+    announcement_channel_id TEXT,
     announcement_min_reactions INT
 );
 
 CREATE TABLE IF NOT EXISTS reacted_messages(
     id SERIAL PRIMARY KEY,
     
-    server_id VARCHAR NOT NULL,
-    channel_id VARCHAR NOT NULL,
-    message_id VARCHAR NOT NULL,
-    author_id VARCHAR NOT NULL,
+    server_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
     reaction_count INT NOT NULL,
     author_reacted BOOL NOT NULL,
     actual_reaction_conut INT GENERATED ALWAYS AS (reaction_count - author_reacted::int) STORED,
 
-    announced_message_id VARCHAR NOT NULL
+    announced_message_id TEXT
 );
 `);
 
