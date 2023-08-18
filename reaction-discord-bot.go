@@ -61,7 +61,8 @@ var commands = []*disc.ApplicationCommand{
 
 var command_handlers = map[string]func(s *disc.Session, i *disc.InteractionCreate) {
     "leaderboard": func(s *disc.Session, i *disc.InteractionCreate) {
-        s.InteractionRespond(i.Interaction, &disc.InteractionResponse{
+        db.Query("");
+        s.InteractionRespond(i.Interaction, &disc.InteractionResponse {
             Type: disc.InteractionResponseChannelMessageWithSource,
             Data: &disc.InteractionResponseData{
                 Content: "todo",
@@ -378,18 +379,18 @@ func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
         return;
     }
     
-    editAnnouncement(s, actual_count, msg);
-
     ins := db.QueryRow(`
-        INSERT INTO reacted_messages (server_id, channel_id, message_id, reaction_count, author_reacted, announced_message_id)
-        SELECT $1, $2, $3, $5, $4, $6
+        INSERT INTO reacted_messages (server_id, channel_id, message_id, author_id, reaction_count, author_reacted, announced_message_id)
+        SELECT $1, $2, $3, $4, $5, $6, $7
         WHERE NOT EXISTS (SELECT 1 FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3);
-    `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count, announced_message_id);
+    `, msg.GuildID, msg.ChannelID, msg.ID, msg.Author.ID, count, author_react, announced_message_id);
 
     if ins.Err() != nil {
         log.Println("Error: db insert query: ", err);
         return;
     }
+    
+    editAnnouncement(s, actual_count, msg);
 
     log.Println("Added or updated record to reacted_messages");
 }
@@ -446,12 +447,12 @@ func reactionRemove(s *disc.Session, m *disc.MessageReactionRemove) {
             message_id = $3;
     `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count);
     
-    editAnnouncement(s, actual_count, msg);
-
     if err != nil {
         log.Println("Error: db update query: ", err);
         return;
     }
+
+    editAnnouncement(s, actual_count, msg);
 
     log.Println("Updated record to reacted_messages");
 }
@@ -485,6 +486,8 @@ func init_db(db *sql.DB) {
             server_id TEXT NOT NULL,
             channel_id TEXT NOT NULL,
             message_id TEXT NOT NULL,
+            author_id TEXT NOT NULL,
+
             reaction_count INT NOT NULL,
             author_reacted BOOL NOT NULL,
             actual_reaction_conut INT GENERATED ALWAYS AS (reaction_count - author_reacted::int) STORED,
