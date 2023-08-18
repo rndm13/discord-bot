@@ -273,6 +273,11 @@ func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
         return
     }
 
+    if m.GuildID == "" {
+        log.Printf("User %s reacted with matching emote ... in a dm\n", m.UserID);
+        return 
+    }
+
     log.Printf("User %s reacted with matching emote\n", m.UserID);
     
     msg, err := s.ChannelMessage(m.ChannelID, m.MessageID)
@@ -374,6 +379,12 @@ func reactionRemove(s *disc.Session, m *disc.MessageReactionRemove) {
     if (m.Emoji.Name != *emoji) {
         return
     }
+    
+    if m.GuildID == "" {
+        log.Printf("User %s removed matching emote ... in a dm\n", m.UserID);
+        return 
+    }
+
     log.Printf("User %s removed matching emote\n", m.UserID);
     
     msg, err := s.ChannelMessage(m.ChannelID, m.MessageID)
