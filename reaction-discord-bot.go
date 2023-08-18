@@ -167,10 +167,10 @@ func handleConfigCommands(s *disc.Session, m *disc.MessageCreate) {
         }
 
         _, err = db.Query(`
-UPDATE server_settings
-SET announcement_channel_id = $2,
-    announcement_min_reactions = $3
-WHERE server_id = $1;
+            UPDATE server_settings
+            SET announcement_channel_id = $2,
+                announcement_min_reactions = $3
+            WHERE server_id = $1;
         `, m.GuildID, chan_id, min_react);
 
         if err != nil {
@@ -211,21 +211,29 @@ func getAnnouncedMessage(s *disc.Session, original *disc.Message) *disc.Message 
     query := db.QueryRow(`
         SELECT announcement_channel_id, announced_message_id
         FROM reacted_messages
-        INNER JOIN server_config ON server_config.server_id = reacted_messages.server_id
-    `)
+        INNER JOIN server_settings ON server_settings.server_id = reacted_messages.server_id
+        WHERE reacted_messages.server_id = $1 AND reacted_messages.channel_id = $2 AND reacted_messages.message_id = $3
+    `, original.GuildID, original.ChannelID, original.ID)
     
     if query.Err() != nil {
+        log.Println("Failed to query announced message: ", query.Err());
         return nil
     }
 
     announced_message_id := ""
     announcement_channel_id := ""
 
-    query.Scan(announcement_channel_id, announced_message_id)
+    err := query.Scan(&announcement_channel_id, &announced_message_id)
+
+    if err != nil {
+        log.Printf("Failed to scan query announced message: %v", err);
+        return nil
+    }
 
     msg, err := s.ChannelMessage(announcement_channel_id, announced_message_id)
 
     if err != nil {
+        log.Printf("Failed to get announced message %v %v: %v", announcement_channel_id, announced_message_id, err);
         return nil
     }
 
@@ -241,6 +249,7 @@ func editAnnouncement(s *disc.Session, actual_count int, original *disc.Message)
     msg := getAnnouncedMessage(s, original)
 
     if msg == nil {
+        log.Printf("Failed to get announcement message to edit");
         return
     }
 
@@ -260,12 +269,17 @@ func editAnnouncement(s *disc.Session, actual_count int, original *disc.Message)
 
     edited_content := fmt.Sprintf("%v%v%v", msg.Content[0:num_start], actual_count, msg.Content[num_end + 1:])
 
-    s.ChannelMessageEditComplex(&disc.MessageEdit{
+    log.Println(msg.ChannelID, msg.ID, edited_content)
+    _, err := s.ChannelMessageEditComplex(&disc.MessageEdit{
         Content: &edited_content,
 
         ID: msg.ID,
         Channel: msg.ChannelID,
     })
+
+    if err != nil {
+        log.Printf("Failed to edit message: %v", err);
+    }
 }
 
 func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
@@ -388,6 +402,7 @@ func reactionRemove(s *disc.Session, m *disc.MessageReactionRemove) {
     log.Printf("User %s removed matching emote\n", m.UserID);
     
     msg, err := s.ChannelMessage(m.ChannelID, m.MessageID)
+    msg.GuildID = m.GuildID // needed to work because for some reason it's not set?????????/
 
     if msg.Author.ID == s.State.User.ID {
 		return
