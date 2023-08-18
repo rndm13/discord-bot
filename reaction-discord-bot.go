@@ -55,13 +55,23 @@ var dg *disc.Session
 var commands = []*disc.ApplicationCommand{
     {
         Name: "leaderboard",
-        Description: "get leaderboard (counts how many reactions user got under their posts)",
+        Description: "get leaderboard (counts how many reactions users got under their posts)",
     },
 }
 
 var command_handlers = map[string]func(s *disc.Session, i *disc.InteractionCreate) {
     "leaderboard": func(s *disc.Session, i *disc.InteractionCreate) {
-        db.Query("");
+        if i.Member == nil {
+            return
+        }
+
+        db.Query(`
+            SELECT author_id, sum(actual_reaction_count) as reactions
+            FROM reacted_messages
+            GROUP BY author_id
+            ORDER BY reactions DESC
+            LIMIT 10;
+        `);
         s.InteractionRespond(i.Interaction, &disc.InteractionResponse {
             Type: disc.InteractionResponseChannelMessageWithSource,
             Data: &disc.InteractionResponseData{
@@ -322,7 +332,7 @@ func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
     
     announ := db.QueryRow(`
         SELECT announced_message_id, author_reacted FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3
-    `,m.GuildID, m.ChannelID, m.MessageID)
+    `, m.GuildID, m.ChannelID, m.MessageID)
     announced_message_id := ""
     var announced_message *disc.Message = nil
 
@@ -348,7 +358,7 @@ func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
             sentmsg, err := s.ChannelMessageSendComplex(
                 conf.announcement_channel_id, 
                 &disc.MessageSend{
-                    Content: fmt.Sprintf("by %v, %v %v (original message: %v)\n\n%v%v", msg.Author.Username, actual_count, *emoji, makeLink(msg), msg.Content, attach_urls),
+                    Content: fmt.Sprintf("by %v, %v %v ([original message](%v))\n\n%v%v", msg.Author.Username, actual_count, *emoji, makeLink(msg), msg.Content, attach_urls),
 
                     // Embeds: msg.Embeds,
                 },
@@ -490,7 +500,7 @@ func init_db(db *sql.DB) {
 
             reaction_count INT NOT NULL,
             author_reacted BOOL NOT NULL,
-            actual_reaction_conut INT GENERATED ALWAYS AS (reaction_count - author_reacted::int) STORED,
+            actual_reaction_count INT GENERATED ALWAYS AS (reaction_count - author_reacted::int) STORED,
 
             announced_message_id TEXT
         );
