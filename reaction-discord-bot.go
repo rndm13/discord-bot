@@ -61,21 +61,56 @@ var commands = []*disc.ApplicationCommand{
 
 var command_handlers = map[string]func(s *disc.Session, i *disc.InteractionCreate) {
     "leaderboard": func(s *disc.Session, i *disc.InteractionCreate) {
-        if i.Member == nil {
+        if i.Member == nil || i.GuildID == ""{ // In a dm or smth
             return
         }
 
-        db.Query(`
+        query, err := db.Query(`
             SELECT author_id, sum(actual_reaction_count) as reactions
             FROM reacted_messages
+            WHERE server_id = $1
             GROUP BY author_id
             ORDER BY reactions DESC
             LIMIT 10;
-        `);
+        `, i.GuildID)
+
+        cont := ""
+
+        if err != nil {
+            log.Println("Failed to fetch leaderboard: ", err);
+            cont = "Failed to fetch leaderboard";
+        } else {
+           num := 1
+            for query.Next() {
+                author := ""
+                reactions := 0
+
+                err := query.Scan(&author, &reactions)
+
+                if err != nil {
+                    log.Println("Failed to scan query results: ", err);
+                    cont = "Failed to scan query results";
+                    break
+                }
+
+                user, err := s.GuildMember(i.GuildID, author)
+
+                if err != nil {
+                    log.Println("Failed to get users info: ", err);
+                    cont = "Failed to get users info";
+                    break
+                }
+
+                cont += fmt.Sprintf("[%v] %v - %v %v", num, user.User.Username, reactions, *emoji)
+
+                num++
+            }
+        }
+
         s.InteractionRespond(i.Interaction, &disc.InteractionResponse {
             Type: disc.InteractionResponseChannelMessageWithSource,
             Data: &disc.InteractionResponseData{
-                Content: "todo",
+                Content: cont,
             },  
         })
     },
