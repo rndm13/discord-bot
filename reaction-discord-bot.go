@@ -340,10 +340,15 @@ func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
         if err != nil {
             log.Println("Error: failed to get server config: ", err)
         } else if actual_count >= conf.announcement_min_reactions {
+            attach_urls := ""
+            for _, ma := range msg.Attachments {
+                attach_urls += ma.URL;
+            }
             sentmsg, err := s.ChannelMessageSendComplex(
                 conf.announcement_channel_id, 
                 &disc.MessageSend{
-                    Content: fmt.Sprintf("by %v, %v %v (original message: %v)\n%v", msg.Author.Username, actual_count, *emoji, makeLink(msg), msg.Content),
+                    Content: fmt.Sprintf("by %v, %v %v (original message: %v)\n\n%v%v", msg.Author.Username, actual_count, *emoji, makeLink(msg), msg.Content, attach_urls),
+
                     // Embeds: msg.Embeds,
                 },
             );
@@ -457,6 +462,7 @@ func insert_settings(g []*disc.Guild) {
             INSERT INTO server_settings (server_id) VALUES ($1)
         `, v.ID);
         if err != nil {
+            // Commented out so doesn't print out when server settings already exist
             // log.Println("failed to initialize settings for guild ", v.ID, ": ", err);
         }
     }
