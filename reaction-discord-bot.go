@@ -61,52 +61,89 @@ var commands = []*disc.ApplicationCommand{
 
 var command_handlers = map[string]func(s *disc.Session, i *disc.InteractionCreate) {
     "leaderboard": func(s *disc.Session, i *disc.InteractionCreate) {
-        if i.Member == nil || i.GuildID == ""{ // In a dm or smth
+        if i.Member == nil || i.GuildID == "" { // In a dm or smth
             return
         }
 
+        respondWithContent := func(cont string) {
+            s.InteractionRespond(i.Interaction, &disc.InteractionResponse {
+                Type: disc.InteractionResponseChannelMessageWithSource,
+                Data: &disc.InteractionResponseData{
+                    Content: cont,
+                },  
+            })
+        }
+
         query, err := db.Query(`
+        SELECT row_number() OVER (ORDER BY reactions DESC) AS position, *
+        FROM (
             SELECT author_id, sum(actual_reaction_count) as reactions
             FROM reacted_messages
             WHERE server_id = $1
-            GROUP BY author_id
-            ORDER BY reactions DESC
-            LIMIT 10;
+            GROUP BY author_id) AS total_reactions
+        LIMIT 10;
         `, i.GuildID)
 
         cont := ""
 
         if err != nil {
-            log.Println("Failed to fetch leaderboard: ", err);
-            cont = "Failed to fetch leaderboard";
-        } else {
-           num := 1
-            for query.Next() {
-                author := ""
-                reactions := 0
+            log.Println("Failed to fetch leaderboard: ", err)
+            respondWithContent("Failed to fetch leaderboard")
+            return
+        }
+        
+        for query.Next() {
+            position := 0
+            author := ""
+            reactions := 0
 
-                err := query.Scan(&author, &reactions)
+            err := query.Scan(&position, &author, &reactions)
 
-                if err != nil {
-                    log.Println("Failed to scan query results: ", err);
-                    cont = "Failed to scan query results";
-                    break
-                }
-
-                user, err := s.GuildMember(i.GuildID, author)
-
-                if err != nil {
-                    log.Println("Failed to get users info: ", err);
-                    cont = "Failed to get users info";
-                    break
-                }
-
-                cont += fmt.Sprintf("[%v] %v - %v %v", num, user.User.Username, reactions, *emoji)
-
-                num++
+            if err != nil {
+                log.Println("Failed to scan query results: ", err);
+                respondWithContent("Failed to scan query results")
+                return
             }
+
+            user, err := s.GuildMember(i.GuildID, author)
+
+            if err != nil {
+                log.Println("Failed to get users info: ", err);
+                respondWithContent("Failed to get users info")
+                return
+            }
+
+            cont += fmt.Sprintf("[%v] %v - %v %v\n", position, user.User.Username, reactions, *emoji)
         }
 
+        cont += "------------------\n"
+
+        personalData := db.QueryRow(`
+            SELECT * 
+            FROM (
+                SELECT row_number() OVER (ORDER BY reactions DESC) AS position, *
+                FROM (
+                    SELECT author_id, sum(actual_reaction_count) as reactions
+                    FROM reacted_messages
+                    WHERE server_id = $1
+                    GROUP BY author_id
+                    ) AS total_reactions
+                ) AS total_positions
+            WHERE author_id = $2;
+        `, i.GuildID, i.Member.User.ID)
+        
+        if personalData.Err() != nil {
+            cont += fmt.Sprintf("Seems like you didn't get any %v reactions", *emoji)
+        } else {
+            personalPosition := 0
+            personalReactions := 0
+            id := 0
+            
+            personalData.Scan(&personalPosition, &id, &personalReactions)
+
+            cont += fmt.Sprintf("[%v] %v - %v %v", personalPosition, i.Member.User.Username, personalReactions, *emoji)
+        }
+        
         s.InteractionRespond(i.Interaction, &disc.InteractionResponse {
             Type: disc.InteractionResponseChannelMessageWithSource,
             Data: &disc.InteractionResponseData{
