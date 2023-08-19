@@ -84,13 +84,54 @@ var command_handlers = map[string]func(s *disc.Session, i *disc.InteractionCreat
         LIMIT 10;
         `, i.GuildID)
 
-        cont := ""
-
         if err != nil {
             log.Println("Failed to fetch leaderboard: ", err)
             respondWithContent("Failed to fetch leaderboard")
             return
         }
+
+        leaderboard_em := &disc.MessageEmbed{
+            Author: &disc.MessageEmbedAuthor{},
+            Fields: []*disc.MessageEmbedField{
+                {
+                    Name: "Position",
+                    Value: "",
+                    Inline: true,
+                },
+                {
+                    Name: "Username",
+                    Value: "",
+                    Inline: true,
+                },
+                {
+                    Name: "Reaction count",
+                    Value: "",
+                    Inline: true,
+                },
+            },
+        }
+
+        personal_em := &disc.MessageEmbed{
+            Author: &disc.MessageEmbedAuthor{},
+            Fields: []*disc.MessageEmbedField{
+                {
+                    Name: "Position",
+                    Value: "",
+                    Inline: true,
+                },
+                {
+                    Name: "Username",
+                    Value: "",
+                    Inline: true,
+                },
+                {
+                    Name: "Reaction count",
+                    Value: "",
+                    Inline: true,
+                },
+            },
+        }
+
         
         for query.Next() {
             position := 0
@@ -113,10 +154,14 @@ var command_handlers = map[string]func(s *disc.Session, i *disc.InteractionCreat
                 return
             }
 
-            cont += fmt.Sprintf("[%v] %v - %v %v\n", position, user.User.Username, reactions, *emoji)
+            leaderboard_em.Fields[0].Value += fmt.Sprintln(position)
+            leaderboard_em.Fields[1].Value += fmt.Sprintln(user.User.Username)
+            leaderboard_em.Fields[2].Value += fmt.Sprintln(reactions)
+
+            // cont += fmt.Sprintf("[%v] %v - %v %v\n", position, user.User.Username, reactions, *emoji)
         }
 
-        cont += "------------------\n"
+        // cont += "------------------\n"
 
         personalData := db.QueryRow(`
             SELECT * 
@@ -133,21 +178,31 @@ var command_handlers = map[string]func(s *disc.Session, i *disc.InteractionCreat
         `, i.GuildID, i.Member.User.ID)
         
         if personalData.Err() != nil {
-            cont += fmt.Sprintf("Seems like you didn't get any %v reactions", *emoji)
+            log.Println("Error: failed to get personal data for user: ", i.Member.User.ID);
         } else {
+            personal_em.Fields[1].Value = i.Member.User.Username
+
             personalPosition := 0
             personalReactions := 0
             id := 0
             
-            personalData.Scan(&personalPosition, &id, &personalReactions)
-
-            cont += fmt.Sprintf("[%v] %v - %v %v", personalPosition, i.Member.User.Username, personalReactions, *emoji)
+            err = personalData.Scan(&personalPosition, &id, &personalReactions)
+            if err != nil { // probably no records found
+                personal_em.Fields[0].Value = "-"
+                personal_em.Fields[2].Value = "-"
+            } else {
+                personal_em.Fields[0].Value = fmt.Sprintln(personalPosition)
+                personal_em.Fields[2].Value = fmt.Sprintln(personalReactions)
+            }
         }
         
         s.InteractionRespond(i.Interaction, &disc.InteractionResponse {
             Type: disc.InteractionResponseChannelMessageWithSource,
             Data: &disc.InteractionResponseData{
-                Content: cont,
+                Embeds: []*disc.MessageEmbed {
+                    leaderboard_em,
+                    personal_em,
+                },
             },  
         })
     },
@@ -323,48 +378,6 @@ func getAnnouncedMessage(s *disc.Session, original *disc.Message) *disc.Message 
     return msg
 }
 
-func editAnnouncement(s *disc.Session, actual_count int, original *disc.Message) {
-    // Kinda stupid but should work....
-    edit_num := false
-    num_start := 0
-    num_end := 0
-    
-    msg := getAnnouncedMessage(s, original)
-
-    if msg == nil {
-        log.Printf("Failed to get announcement message to edit");
-        return
-    }
-
-    for i, v := range msg.Content {
-        if v >= '0' && v <= '9' {
-            if num_start == 0 {
-                edit_num = true
-                num_start = i
-            }
-            if edit_num {
-                num_end = i
-            }
-        } else {
-            edit_num = false
-        }
-    }
-
-    edited_content := fmt.Sprintf("%v%v%v", msg.Content[0:num_start], actual_count, msg.Content[num_end + 1:])
-
-    log.Println(msg.ChannelID, msg.ID, edited_content)
-    _, err := s.ChannelMessageEditComplex(&disc.MessageEdit{
-        Content: &edited_content,
-
-        ID: msg.ID,
-        Channel: msg.ChannelID,
-    })
-
-    if err != nil {
-        log.Printf("Failed to edit message: %v", err);
-    }
-}
-
 func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
     if m.Emoji.Name != *emoji {
         return
@@ -378,101 +391,52 @@ func reactionAdd(s *disc.Session, m *disc.MessageReactionAdd) {
     log.Printf("User %s reacted with matching emote\n", m.UserID);
     
     msg, err := s.ChannelMessage(m.ChannelID, m.MessageID)
-    msg.GuildID = m.GuildID // needed for makeLink to work because for some reason it's not set?????????/
 
     if err != nil {
         log.Println("Error: failed to get channel message reacted to: ", err);
         return;
     }
+    
+    msg.GuildID = m.GuildID // needed for makeLink to work because for some reason it's not set?????????/
    	
-    if msg.Author.ID == s.State.User.ID {
+    if msg.Author.Bot { 
 		return
 	} 
 
-    count := 1
-
-    for _, mr := range msg.Reactions {
-        if mr.Emoji.Name != *emoji {
-            continue
-        }
-
-        count = mr.Count
-        break
-    }
-    
     author_react := m.Member.User.ID == msg.Author.ID
-    
-    announ := db.QueryRow(`
-        SELECT announced_message_id, author_reacted FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3
-    `, m.GuildID, m.ChannelID, m.MessageID)
-    announced_message_id := ""
-    var announced_message *disc.Message = nil
 
-    if announ != nil {
-        announ.Scan(&announced_message_id, &author_react)
-    }
-
-    actual_count := count
+    to_increment := 1
     if author_react {
-        actual_count--
-    }
-    
-    if announced_message_id == "" {
-        conf, err := getServerConfig(m.GuildID)
-
-        if err != nil {
-            log.Println("Error: failed to get server config: ", err)
-        } else if actual_count >= conf.announcement_min_reactions {
-            attach_urls := ""
-            for _, ma := range msg.Attachments {
-                attach_urls += ma.URL;
-            }
-            sentmsg, err := s.ChannelMessageSendComplex(
-                conf.announcement_channel_id, 
-                &disc.MessageSend{
-                    Content: fmt.Sprintf("by %v, %v %v ([original message](%v))\n\n%v%v", msg.Author.Username, actual_count, *emoji, makeLink(msg), msg.Content, attach_urls),
-
-                    // Embeds: msg.Embeds,
-                },
-            );
-
-            if err != nil {
-                log.Println("Failed to sent announcement message: ", err);
-            } else {
-                announced_message = sentmsg
-                announced_message_id = announced_message.ID
-            }
-        }
+        to_increment = 0
     }
 
-    upd := db.QueryRow(`
+    _, err = db.Query(`
         UPDATE reacted_messages
-        SET reaction_count = $5,
-            author_reacted = author_reacted OR $4,
-            announced_message_id = $6
+        SET reaction_count = reaction_count + $4,
+            author_reacted = author_reacted OR $5
         WHERE 
             server_id = $1 AND 
             channel_id = $2 AND 
             message_id = $3;
-    `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count, announced_message_id);
+    `, msg.GuildID, msg.ChannelID, msg.ID, to_increment, author_react);
 
-    if upd.Err() != nil {
+    if err != nil {
         log.Println("Error: db update query: ", err);
         return;
     }
     
     ins := db.QueryRow(`
-        INSERT INTO reacted_messages (server_id, channel_id, message_id, author_id, reaction_count, author_reacted, announced_message_id)
-        SELECT $1, $2, $3, $4, $5, $6, $7
+        INSERT INTO reacted_messages (server_id, channel_id, message_id, author_id, reaction_count, author_reacted)
+        SELECT $1, $2, $3, $4, $5, $6
         WHERE NOT EXISTS (SELECT 1 FROM reacted_messages WHERE server_id = $1 AND channel_id = $2 AND message_id = $3);
-    `, msg.GuildID, msg.ChannelID, msg.ID, msg.Author.ID, count, author_react, announced_message_id);
+    `, msg.GuildID, msg.ChannelID, msg.ID, msg.Author.ID, 1, author_react);
 
     if ins.Err() != nil {
         log.Println("Error: db insert query: ", err);
         return;
     }
-    
-    editAnnouncement(s, actual_count, msg);
+
+    sendOrEditAnnouncement(s, msg)
 
     log.Println("Added or updated record to reacted_messages");
 }
@@ -501,42 +465,117 @@ func reactionRemove(s *disc.Session, m *disc.MessageReactionRemove) {
         return;
     }
     
-    count := 0
-
-    for _, mr := range msg.Reactions {
-        if mr.Emoji.Name != *emoji {
-            continue
-        }
-
-        count = mr.Count
-        break
+    author_unreact := m.UserID == msg.Author.ID
+    to_decrement := 1
+    if !author_unreact {
+        to_decrement = 0
     }
-    
-    author_react := count > 0 && m.UserID == msg.Author.ID
         
-    actual_count := count
-    if author_react {
-        actual_count--
-    }
-
     _, err = db.Query(`
         UPDATE reacted_messages
-        SET reaction_count = $5,
-            author_reacted = author_reacted AND $4
+        SET reaction_count = reaction_count - $4,
+            author_reacted = author_reacted AND NOT $5
         WHERE 
             server_id = $1 AND 
             channel_id = $2 AND 
             message_id = $3;
-    `, msg.GuildID, msg.ChannelID, msg.ID, author_react, count);
+    `, msg.GuildID, msg.ChannelID, msg.ID, to_decrement, author_unreact);
     
+    sendOrEditAnnouncement(s, msg)
+
     if err != nil {
         log.Println("Error: db update query: ", err);
         return;
     }
 
-    editAnnouncement(s, actual_count, msg);
-
     log.Println("Updated record to reacted_messages");
+}
+
+func sendOrEditAnnouncement(s *disc.Session, orig *disc.Message) {
+    conf, err := getServerConfig(orig.GuildID)
+    
+    if err != nil {
+        log.Println("Failed to get server config: ", err);
+        return
+    }
+
+    query := db.QueryRow(`
+        SELECT announced_message_id, actual_reaction_count, author_reacted
+        FROM reacted_messages
+        WHERE server_id = $1 AND channel_id = $2 AND message_id = $3
+    `, orig.GuildID, orig.ChannelID, orig.ID);
+
+    if query.Err() != nil {
+        log.Println("Failed to query original message data: ", err);
+        return
+    }
+
+    announ_id := &sql.NullString{}
+    count := 0
+    author := false
+
+    err = query.Scan(announ_id, &count, &author)
+    
+    if err != nil {
+        log.Println("Failed to scan original message data: ", err);
+        return
+    }
+
+    if conf.announcement_min_reactions > count {
+        return
+    }
+
+    attach_urls := ""
+    for _, attach := range orig.Attachments {
+        attach_urls += attach.URL;
+    }
+
+    self_react := ""
+    if author {
+        self_react = "(self react)"
+    }
+    
+    content := fmt.Sprintf("%v %v %v; by %v [original message](%v)\n\n%v%v", count, *emoji, self_react, orig.Author.Username, makeLink(orig), orig.Content, attach_urls)
+
+    if announ_id.Valid { // needs to be edited
+        _, err := s.ChannelMessageEditComplex(
+            &disc.MessageEdit{
+                ID: announ_id.String,
+                Channel: conf.announcement_channel_id,
+                Content: &content,
+            },
+        )
+        
+        if err != nil {
+            log.Println("Error: failed to send announcement message: ", err)
+            return
+        }
+    } else { // needs to be sent
+        sentmsg, err := s.ChannelMessageSendComplex(
+            conf.announcement_channel_id,
+            &disc.MessageSend{
+                Content: content,
+            },
+        )
+        
+        if err != nil {
+            log.Println("Error: failed to send announcement message: ", err)
+            return
+        }
+
+        _, err = db.Query(`
+            UPDATE reacted_messages
+            SET announced_message_id = $4
+            WHERE 
+                server_id = $1 AND 
+                channel_id = $2 AND 
+                message_id = $3;
+        `, orig.GuildID, orig.ChannelID, orig.ID, sentmsg.ID)
+
+        if err != nil {
+            log.Println("Error: failed to update original message record to set announced message id: ", err)
+        }
+    }
 }
 
 func insert_settings(g []*disc.Guild) {
